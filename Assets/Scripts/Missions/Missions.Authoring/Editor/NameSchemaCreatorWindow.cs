@@ -5,16 +5,25 @@ using UnityEngine;
 using UnityEditor;
 using Missions.Missions.Authoring.Schemas;
 using Missions.Missions.Authoring.Settings;
+using UnityEngine.UIElements;
+using UnityEditor.UIElements;
 
 namespace Missions.Missions.Authoring.Editor
 {
     public class NameSchemaCreatorWindow : EditorWindow
     {
         private string _nameInput = "";
-        private Vector2 _scrollPosition;
         private NameSettings _nameSettings;
         private bool _showExistingNames = true;
         private string _outputPath = "Assets/ScriptableObjects/NameSchemas";
+
+        // UI Toolkit elements
+        private ObjectField _settingsField;
+        private TextField _pathField;
+        private TextField _namesField;
+        private Foldout _existingFoldout;
+        private ListView _existingListView;
+        private Label _statsLabel;
 
         [MenuItem("Tools/Schema/Name Schema Creator")]
         public static void ShowWindow()
@@ -32,7 +41,6 @@ namespace Missions.Missions.Authoring.Editor
 
         private void LoadNameSettings()
         {
-            // Try to find existing NameSettings
             string[] guids = AssetDatabase.FindAssets("t:NameSettings");
             if (guids.Length > 0)
             {
@@ -40,7 +48,6 @@ namespace Missions.Missions.Authoring.Editor
                 _nameSettings = AssetDatabase.LoadAssetAtPath<NameSettings>(path);
             }
 
-            // Create NameSettings if it doesn't exist
             if (_nameSettings == null)
             {
                 _nameSettings = CreateInstance<NameSettings>();
@@ -54,10 +61,153 @@ namespace Missions.Missions.Authoring.Editor
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
             }
+
+            if (_settingsField != null)
+            {
+                _settingsField.value = _nameSettings;
+                RebuildExistingList();
+                UpdateStats();
+            }
+        }
+
+        public void CreateGUI()
+        {
+            // Load UXML/USS
+            var uxml = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>("Assets/Scripts/Missions/Missions.Authoring/Editor/UI/NameSchemaCreatorWindow.uxml");
+            var uss = AssetDatabase.LoadAssetAtPath<StyleSheet>("Assets/Scripts/Missions/Missions.Authoring/Editor/UI/MissionsEditor.uss");
+
+            rootVisualElement.Clear();
+            if (uss != null) rootVisualElement.styleSheets.Add(uss);
+            if (uxml != null) uxml.CloneTree(rootVisualElement);
+
+            // Query controls
+            var refreshBtn = rootVisualElement.Q<ToolbarButton>("refreshButton");
+            _statsLabel = rootVisualElement.Q<Label>("statsLabel");
+            _settingsField = rootVisualElement.Q<ObjectField>("settingsField");
+            _pathField = rootVisualElement.Q<TextField>("pathField");
+            var browseBtn = rootVisualElement.Q<Button>("browseButton");
+            _namesField = rootVisualElement.Q<TextField>("namesField");
+            var createBtn = rootVisualElement.Q<Button>("createButton");
+            var clearBtn = rootVisualElement.Q<Button>("clearButton");
+            _existingFoldout = rootVisualElement.Q<Foldout>("existingFoldout");
+            _existingListView = rootVisualElement.Q<ListView>("existingList");
+
+            // Wire
+            if (refreshBtn != null) refreshBtn.clicked += LoadNameSettings;
+            if (_settingsField != null)
+            {
+                _settingsField.objectType = typeof(NameSettings);
+                _settingsField.allowSceneObjects = false;
+                _settingsField.value = _nameSettings;
+                _settingsField.RegisterValueChangedCallback(evt =>
+                {
+                    _nameSettings = evt.newValue as NameSettings;
+                    RebuildExistingList();
+                    UpdateStats();
+                });
+            }
+            if (_pathField != null)
+            {
+                _pathField.value = _outputPath;
+                _pathField.RegisterValueChangedCallback(evt => { _outputPath = evt.newValue; });
+            }
+            if (browseBtn != null)
+            {
+                browseBtn.clicked += () =>
+                {
+                    string selectedPath = EditorUtility.OpenFolderPanel("Select Output Folder", Application.dataPath, "");
+                    if (!string.IsNullOrEmpty(selectedPath) && selectedPath.StartsWith(Application.dataPath))
+                    {
+                        _outputPath = "Assets" + selectedPath.Substring(Application.dataPath.Length);
+                        if (_pathField != null) _pathField.value = _outputPath;
+                        EditorPrefs.SetString(CreatePath, _outputPath);
+                    }
+                };
+            }
+            if (_namesField != null)
+            {
+                _namesField.multiline = true;
+                _namesField.value = _nameInput;
+                _namesField.RegisterValueChangedCallback(evt => { _nameInput = evt.newValue; });
+            }
+            if (createBtn != null)
+            {
+                createBtn.clicked += () => { CreateNameSchemas(); RebuildExistingList(); UpdateStats(); };
+            }
+            if (clearBtn != null)
+            {
+                clearBtn.clicked += () => { _nameInput = ""; if (_namesField != null) _namesField.value = ""; };
+            }
+            if (_existingFoldout != null)
+            {
+                _existingFoldout.value = _showExistingNames;
+                _existingFoldout.RegisterValueChangedCallback(evt => _showExistingNames = evt.newValue);
+            }
+            if (_existingListView != null)
+            {
+                _existingListView.virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight;
+                _existingListView.selectionType = SelectionType.None;
+                _existingListView.makeItem = () =>
+                {
+                    var row = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center } };
+                    var label = new Label { style = { flexGrow = 1 } };
+                    var selectBtn = new Button { text = "Select" };
+                    selectBtn.style.width = 60;
+                    row.Add(label);
+                    row.Add(selectBtn);
+                    return row;
+                };
+                _existingListView.bindItem = (el, i) =>
+                {
+                    if (_nameSettings == null || _nameSettings.schemas == null) return;
+                    var ordered = _nameSettings.schemas.OrderBy(s => s.fixed32).ToList();
+                    if (i < 0 || i >= ordered.Count) return;
+                    var data = ordered[i];
+                    el.Q<Label>().text = $"{data.ID}: {data.fixed32}";
+                    var btn = el.Q<Button>();
+                    btn.clicked -= null;
+                    btn.clicked += () => { Selection.activeObject = data; EditorGUIUtility.PingObject(data); };
+                };
+            }
+
+            RebuildExistingList();
+            UpdateStats();
+        }
+
+        private string BuildExistingTitle()
+        {
+            int count = _nameSettings != null && _nameSettings.schemas != null ? _nameSettings.schemas.Length : 0;
+            return $"Existing Names ({count})";
+        }
+
+        private void RebuildExistingList()
+        {
+            if (_existingListView == null) return;
+            if (_nameSettings == null || _nameSettings.schemas == null)
+            {
+                _existingListView.itemsSource = new List<NameSchema>();
+            }
+            else
+            {
+                var src = _nameSettings.schemas.OrderBy(s => s.fixed32).ToList();
+                _existingListView.itemsSource = src;
+                if (_existingFoldout != null) _existingFoldout.text = BuildExistingTitle();
+            }
+            _existingListView.Rebuild();
+        }
+
+        private void UpdateStats()
+        {
+            if (_statsLabel == null) return;
+            int count = _nameSettings != null && _nameSettings.schemas != null ? _nameSettings.schemas.Length : 0;
+            _statsLabel.text = $"Total Schemas: {count}";
         }
 
         private void OnGUI()
         {
+            // Fallback for older Unity versions without CreateGUI support
+            if (rootVisualElement != null && rootVisualElement.childCount > 0) return;
+
             GUILayout.Label("Name Schema Creator", EditorStyles.boldLabel);
             GUILayout.Space(10);
 
@@ -69,7 +219,6 @@ namespace Missions.Missions.Authoring.Editor
             {
                 LoadNameSettings();
             }
-
             EditorGUILayout.EndHorizontal();
 
             if (_nameSettings == null)
@@ -92,16 +241,13 @@ namespace Missions.Missions.Authoring.Editor
                     _outputPath = "Assets" + selectedPath.Substring(Application.dataPath.Length);
                 }
             }
-
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(10);
 
             // Text area for names input
             EditorGUILayout.LabelField("Enter Names (one per line):");
-            _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition, GUILayout.Height(150));
             _nameInput = EditorGUILayout.TextArea(_nameInput, GUILayout.ExpandHeight(true));
-            EditorGUILayout.EndScrollView();
 
             GUILayout.Space(10);
 
@@ -111,20 +257,17 @@ namespace Missions.Missions.Authoring.Editor
             {
                 CreateNameSchemas();
             }
-
             if (GUILayout.Button("Clear Input"))
             {
                 _nameInput = "";
                 GUI.FocusControl(null);
             }
-
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(20);
 
             // Show existing names
-            _showExistingNames =
-                EditorGUILayout.Foldout(_showExistingNames, $"Existing Names ({_nameSettings.schemas.Length})");
+            _showExistingNames = EditorGUILayout.Foldout(_showExistingNames, BuildExistingTitle());
             if (_showExistingNames)
             {
                 EditorGUI.indentLevel++;
@@ -144,13 +287,10 @@ namespace Missions.Missions.Authoring.Editor
                             Selection.activeObject = schema;
                             EditorGUIUtility.PingObject(schema);
                         }
-
                         EditorGUILayout.EndHorizontal();
                     }
-
                     EditorGUILayout.EndVertical();
                 }
-
                 EditorGUI.indentLevel--;
             }
         }
@@ -176,7 +316,6 @@ namespace Missions.Missions.Authoring.Editor
                     {
                         AssetDatabase.CreateFolder(currentPath, pathParts[i]);
                     }
-
                     currentPath = newPath;
                 }
             }
@@ -273,15 +412,14 @@ namespace Missions.Missions.Authoring.Editor
             string resultMessage = $"Successfully created {createdCount} name schema(s).";
             if (existingNames.Count > 0)
             {
-                resultMessage +=
-                    $"\n\nSkipped {existingNames.Count} existing name(s):\n{string.Join(", ", existingNames)}";
+                resultMessage += $"\n\nSkipped {existingNames.Count} existing name(s):\n{string.Join(", ", existingNames)}";
             }
 
             EditorUtility.DisplayDialog("Success", resultMessage, "OK");
 
             // Clear input
             _nameInput = "";
-            GUI.FocusControl(null);
+            if (_namesField != null) _namesField.value = "";
         }
 
         private int GetNextAvailableId()
